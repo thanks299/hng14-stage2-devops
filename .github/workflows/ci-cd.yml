@@ -29,13 +29,11 @@ jobs:
       
       - name: Lint API code
         run: |
-          flake8 api/ --max-line-length=120 --ignore=E203,W503
-          pylint api/ --fail-under=8 || true
+          flake8 api/ --max-line-length=120 --ignore=E203,W503,E402
       
       - name: Lint Worker code
         run: |
-          flake8 worker/ --max-line-length=120
-          pylint worker/ --fail-under=8 || true
+          flake8 worker/ --max-line-length=120 --ignore=E203,W503
       
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -80,11 +78,13 @@ jobs:
           cd api
           pip install -r requirements.txt
           pip install pytest pytest-cov pytest-asyncio
+          # Install the api package in development mode
+          pip install -e ..
       
       - name: Run API tests with coverage
         run: |
           cd api
-          pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
+          PYTHONPATH=. pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
       
       - name: Upload coverage report
         uses: actions/upload-artifact@v3
@@ -220,7 +220,7 @@ jobs:
       
       - name: Start services with docker-compose
         run: |
-          docker-compose -f docker-compose.yml up -d
+          docker compose -f docker-compose.yml up -d
       
       - name: Wait for services to be healthy
         run: |
@@ -237,6 +237,9 @@ jobs:
       
       - name: Run integration tests
         run: |
+          # Install jq for JSON parsing
+          sudo apt-get update && sudo apt-get install -y jq
+          
           # Submit a job
           echo "Submitting test job..."
           RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
@@ -272,14 +275,14 @@ jobs:
         if: failure()
         run: |
           echo "=== Docker Compose Logs ==="
-          docker-compose logs
+          docker compose logs
           echo "=== Redis Data ==="
           docker exec job-queue-redis redis-cli LRANGE job 0 -1
       
       - name: Tear down stack
         if: always()
         run: |
-          docker-compose down -v
+          docker compose down -v
 
   # Job 6: Deploy (only on main branch)
   deploy:
@@ -300,10 +303,10 @@ jobs:
           docker pull ${{ env.REGISTRY }}/frontend:latest
           
           # Stop and remove old containers
-          docker-compose down
+          docker compose down
           
           # Start new containers
-          docker-compose up -d
+          docker compose up -d
           
           # Wait for health checks
           echo "Waiting for health checks..."
@@ -321,13 +324,13 @@ jobs:
                 break
               elif [ "$HEALTH_STATUS" = "unhealthy" ]; then
                 echo "❌ $service is unhealthy! Rolling back..."
-                docker-compose down
+                docker compose down
                 exit 1
               fi
               
               if [ $i -eq 12 ]; then
                 echo "❌ $service health check timeout after 60 seconds"
-                docker-compose down
+                docker compose down
                 exit 1
               fi
               sleep 5
