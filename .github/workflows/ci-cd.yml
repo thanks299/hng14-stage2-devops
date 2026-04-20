@@ -11,15 +11,14 @@ env:
   SHA_TAG: ${{ github.sha }}
 
 jobs:
-  # Job 1: Lint all code
   lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -36,7 +35,7 @@ jobs:
           flake8 worker/ --max-line-length=120 --ignore=E203,W503,E302,E305,W293
       
       - name: Set up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
       
@@ -69,16 +68,15 @@ jobs:
           dockerfile: frontend/Dockerfile
           failure-threshold: warning
 
-  # Job 2: Run unit tests
   test:
     needs: lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -95,27 +93,28 @@ jobs:
           PYTHONPATH=. pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
       
       - name: Upload coverage report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: api/coverage.xml
+          retention-days: 7
       
       - name: Upload HTML coverage report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-html
           path: api/htmlcov/
+          retention-days: 7
 
-  # Job 3: Build Docker images
   build:
     needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       
       - name: Start local Docker registry
         run: |
@@ -150,55 +149,54 @@ jobs:
           docker images
           curl -X GET http://localhost:5000/v2/_catalog
 
-  # Job 4: Security scan with Trivy
   security-scan:
     needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
-      - name: Run Trivy vulnerability scanner (API)
+      - name: Run Trivy on API image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/api:${{ env.SHA_TAG }}
-          format: 'sarif'
-          output: 'trivy-results-api.sarif'
-          severity: 'CRITICAL,HIGH'
+          format: sarif
+          output: trivy-results-api.sarif
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
       
-      - name: Run Trivy vulnerability scanner (Worker)
+      - name: Run Trivy on Worker image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/worker:${{ env.SHA_TAG }}
-          format: 'sarif'
-          output: 'trivy-results-worker.sarif'
-          severity: 'CRITICAL,HIGH'
+          format: sarif
+          output: trivy-results-worker.sarif
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
       
-      - name: Run Trivy vulnerability scanner (Frontend)
+      - name: Run Trivy on Frontend image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/frontend:${{ env.SHA_TAG }}
-          format: 'sarif'
-          output: 'trivy-results-frontend.sarif'
-          severity: 'CRITICAL,HIGH'
+          format: sarif
+          output: trivy-results-frontend.sarif
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
       
-      - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v2
+      - name: Upload Trivy results for API
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: 'trivy-results-api.sarif'
+          sarif_file: trivy-results-api.sarif
       
-      - name: Upload Trivy results (Worker)
-        uses: github/codeql-action/upload-sarif@v2
+      - name: Upload Trivy results for Worker
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: 'trivy-results-worker.sarif'
+          sarif_file: trivy-results-worker.sarif
       
-      - name: Upload Trivy results (Frontend)
-        uses: github/codeql-action/upload-sarif@v2
+      - name: Upload Trivy results for Frontend
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: 'trivy-results-frontend.sarif'
+          sarif_file: trivy-results-frontend.sarif
       
       - name: Check for CRITICAL vulnerabilities
         run: |
@@ -208,13 +206,12 @@ jobs:
           fi
           echo "No CRITICAL vulnerabilities found"
 
-  # Job 5: Integration tests
   integration-test:
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Create .env file for testing
         run: |
@@ -226,11 +223,10 @@ jobs:
           LOG_LEVEL=INFO
           EOF
       
-      - name: Start services with docker-compose
-        run: |
-          docker compose -f docker-compose.yml up -d
+      - name: Start services
+        run: docker compose -f docker-compose.yml up -d
       
-      - name: Wait for services to be healthy
+      - name: Wait for services
         run: |
           echo "Waiting for services to be ready..."
           sleep 30
@@ -245,10 +241,8 @@ jobs:
       
       - name: Run integration tests
         run: |
-          # Install jq for JSON parsing
           sudo apt-get update && sudo apt-get install -y jq
           
-          # Submit a job
           echo "Submitting test job..."
           RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
           echo $RESPONSE
@@ -261,25 +255,24 @@ jobs:
           
           echo "Job ID: $JOB_ID"
           
-          # Poll for job completion
           for i in {1..30}; do
             STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
             echo "Attempt $i/30 - Job status: $STATUS"
             
             if [ "$STATUS" = "completed" ]; then
-              echo "✅ Job completed successfully!"
+              echo "Job completed successfully!"
               exit 0
             elif [ "$STATUS" = "failed" ]; then
-              echo "❌ Job failed!"
+              echo "Job failed!"
               exit 1
             fi
             sleep 2
           done
           
-          echo "❌ Job did not complete within timeout"
+          echo "Job did not complete within timeout"
           exit 1
       
-      - name: Debug logs if test fails
+      - name: Debug logs
         if: failure()
         run: |
           echo "=== Docker Compose Logs ==="
@@ -289,38 +282,30 @@ jobs:
       
       - name: Tear down stack
         if: always()
-        run: |
-          docker compose down -v
+        run: docker compose down -v
 
-  # Job 6: Deploy (only on main branch)
   deploy:
     needs: integration-test
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Deploy with rolling update
         run: |
           echo "Starting rolling update deployment..."
           
-          # Pull latest images
           docker pull ${{ env.REGISTRY }}/api:latest
           docker pull ${{ env.REGISTRY }}/worker:latest
           docker pull ${{ env.REGISTRY }}/frontend:latest
           
-          # Stop and remove old containers
           docker compose down
-          
-          # Start new containers
           docker compose up -d
           
-          # Wait for health checks
           echo "Waiting for health checks..."
           sleep 30
           
-          # Verify all services are healthy
           for service in api worker frontend; do
             CONTAINER_NAME="job-queue-$service"
             for i in {1..12}; do
@@ -328,16 +313,16 @@ jobs:
               echo "Service $service health status: $HEALTH_STATUS"
               
               if [ "$HEALTH_STATUS" = "healthy" ]; then
-                echo "✅ $service is healthy"
+                echo "$service is healthy"
                 break
               elif [ "$HEALTH_STATUS" = "unhealthy" ]; then
-                echo "❌ $service is unhealthy! Rolling back..."
+                echo "$service is unhealthy! Rolling back..."
                 docker compose down
                 exit 1
               fi
               
               if [ $i -eq 12 ]; then
-                echo "❌ $service health check timeout after 60 seconds"
+                echo "$service health check timeout after 60 seconds"
                 docker compose down
                 exit 1
               fi
@@ -345,7 +330,7 @@ jobs:
             done
           done
           
-          echo "✅ Deployment successful! All services are healthy."
+          echo "Deployment successful! All services are healthy."
       
       - name: Verify deployment
         run: |
