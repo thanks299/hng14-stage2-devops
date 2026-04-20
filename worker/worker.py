@@ -7,6 +7,7 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
+
 # Configure logging
 logging.basicConfig(
     level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -23,6 +24,7 @@ WORKER_POLL_INTERVAL = int(os.getenv('WORKER_POLL_INTERVAL', 5))
 HEALTH_PORT = int(os.getenv('HEALTH_PORT', 8080))
 
 running = True
+
 
 def get_redis_connection():
     """Create Redis connection with retry logic"""
@@ -48,6 +50,7 @@ def get_redis_connection():
     logger.error("Could not connect to Redis after retries")
     return None
 
+
 def process_job(job_id):
     """Process a single job"""
     try:
@@ -66,9 +69,10 @@ def process_job(job_id):
         if r:
             r.hset(f"job:{job_id}", "status", "failed")
 
+
 class HealthHandler(BaseHTTPRequestHandler):
     """Health check endpoint for the worker"""
-    
+
     def do_GET(self):
         if self.path == '/health':
             self.send_response(200)
@@ -78,16 +82,18 @@ class HealthHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-    
+
     def log_message(self, format, *args):
-        # Suppress health check logs
+        """Suppress health check logs"""
         pass
+
 
 def start_health_server():
     """Start a simple HTTP server for health checks"""
     server = HTTPServer(('0.0.0.0', HEALTH_PORT), HealthHandler)
     logger.info(f"Health server running on port {HEALTH_PORT}")
     server.serve_forever()
+
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
@@ -97,6 +103,7 @@ def signal_handler(signum, frame):
     # Give time for current job to complete
     time.sleep(2)
     sys.exit(0)
+
 
 # Register signal handlers
 signal.signal(signal.SIGTERM, signal_handler)
@@ -118,15 +125,15 @@ while running:
             if not redis_client:
                 time.sleep(5)
                 continue
-        
+
         # Use brpop with timeout to allow checking running flag
         result = redis_client.brpop("job", timeout=WORKER_POLL_INTERVAL)
-        
+
         if result and running:
             _, job_id = result
             logger.info(f"Picked up job: {job_id}")
             process_job(job_id)
-            
+
     except redis.ConnectionError as e:
         logger.error(f"Redis connection error: {e}")
         redis_client = None
