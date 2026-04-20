@@ -8,44 +8,39 @@ on:
 
 env:
   REGISTRY: localhost:5000
-  SHA_TAG: ${{ github.sha }}
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install Python linters
-        run: |
-          pip install flake8 pylint
+        run: pip install flake8 pylint
       
-      - name: Lint API code
-        run: |
-          flake8 api/ --max-line-length=120 --ignore=E203,W503,E402,E302,E305,W293
+      - name: Lint API
+        run: flake8 api/ --max-line-length=120 --ignore=E203,W503,E402,E302,E305,W293
       
-      - name: Lint Worker code
-        run: |
-          flake8 worker/ --max-line-length=120 --ignore=E203,W503,E302,E305,W293
+      - name: Lint Worker
+        run: flake8 worker/ --max-line-length=120 --ignore=E203,W503,E302,E305,W293
       
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
       
-      - name: Install JavaScript linter
+      - name: Install JS linter
         run: |
           cd frontend
           npm install -g eslint
           npm install
       
-      - name: Lint Frontend code
+      - name: Lint Frontend
         run: |
           cd frontend
           eslint . --ext .js --max-warnings=0 || true
@@ -72,10 +67,9 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -85,21 +79,20 @@ jobs:
           cd api
           pip install -r requirements.txt
           pip install pytest pytest-cov pytest-asyncio
-          pip install -e .
       
-      - name: Run API tests with coverage
+      - name: Run API tests
         run: |
           cd api
-          PYTHONPATH=. pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
+          python -m pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
       
-      - name: Upload coverage report
+      - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: api/coverage.xml
           retention-days: 7
       
-      - name: Upload HTML coverage report
+      - name: Upload HTML coverage
         uses: actions/upload-artifact@v4
         with:
           name: coverage-html
@@ -110,98 +103,77 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Set up Docker Buildx
+      - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      - name: Start local Docker registry
-        run: |
-          docker run -d -p 5000:5000 --name registry registry:2
+      - name: Start Docker registry
+        run: docker run -d -p 5000:5000 --name registry registry:2
       
       - name: Build API image
-        run: |
-          docker build -t ${{ env.REGISTRY }}/api:${{ env.SHA_TAG }} ./api
-          docker tag ${{ env.REGISTRY }}/api:${{ env.SHA_TAG }} ${{ env.REGISTRY }}/api:latest
+        run: docker build -t localhost:5000/api:${{ github.sha }} ./api
       
       - name: Build Worker image
-        run: |
-          docker build -t ${{ env.REGISTRY }}/worker:${{ env.SHA_TAG }} ./worker
-          docker tag ${{ env.REGISTRY }}/worker:${{ env.SHA_TAG }} ${{ env.REGISTRY }}/worker:latest
+        run: docker build -t localhost:5000/worker:${{ github.sha }} ./worker
       
       - name: Build Frontend image
-        run: |
-          docker build -t ${{ env.REGISTRY }}/frontend:${{ env.SHA_TAG }} ./frontend
-          docker tag ${{ env.REGISTRY }}/frontend:${{ env.SHA_TAG }} ${{ env.REGISTRY }}/frontend:latest
+        run: docker build -t localhost:5000/frontend:${{ github.sha }} ./frontend
       
-      - name: Push images to local registry
+      - name: Tag images as latest
         run: |
-          docker push ${{ env.REGISTRY }}/api:${{ env.SHA_TAG }}
-          docker push ${{ env.REGISTRY }}/api:latest
-          docker push ${{ env.REGISTRY }}/worker:${{ env.SHA_TAG }}
-          docker push ${{ env.REGISTRY }}/worker:latest
-          docker push ${{ env.REGISTRY }}/frontend:${{ env.SHA_TAG }}
-          docker push ${{ env.REGISTRY }}/frontend:latest
+          docker tag localhost:5000/api:${{ github.sha }} localhost:5000/api:latest
+          docker tag localhost:5000/worker:${{ github.sha }} localhost:5000/worker:latest
+          docker tag localhost:5000/frontend:${{ github.sha }} localhost:5000/frontend:latest
       
-      - name: List images
+      - name: Push images
         run: |
-          docker images
-          curl -X GET http://localhost:5000/v2/_catalog
+          docker push localhost:5000/api:${{ github.sha }}
+          docker push localhost:5000/api:latest
+          docker push localhost:5000/worker:${{ github.sha }}
+          docker push localhost:5000/worker:latest
+          docker push localhost:5000/frontend:${{ github.sha }}
+          docker push localhost:5000/frontend:latest
 
   security-scan:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Run Trivy on API image
+      - name: Scan API
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/api:${{ env.SHA_TAG }}
+          image-ref: localhost:5000/api:${{ github.sha }}
           format: sarif
-          output: trivy-results-api.sarif
+          output: trivy-api.sarif
           severity: CRITICAL,HIGH
-          ignore-unfixed: true
       
-      - name: Run Trivy on Worker image
+      - name: Scan Worker
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/worker:${{ env.SHA_TAG }}
+          image-ref: localhost:5000/worker:${{ github.sha }}
           format: sarif
-          output: trivy-results-worker.sarif
+          output: trivy-worker.sarif
           severity: CRITICAL,HIGH
-          ignore-unfixed: true
       
-      - name: Run Trivy on Frontend image
+      - name: Scan Frontend
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/frontend:${{ env.SHA_TAG }}
+          image-ref: localhost:5000/frontend:${{ github.sha }}
           format: sarif
-          output: trivy-results-frontend.sarif
+          output: trivy-frontend.sarif
           severity: CRITICAL,HIGH
-          ignore-unfixed: true
       
-      - name: Upload Trivy results for API
+      - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-results-api.sarif
+          sarif_file: trivy-api.sarif
       
-      - name: Upload Trivy results for Worker
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-results-worker.sarif
-      
-      - name: Upload Trivy results for Frontend
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-results-frontend.sarif
-      
-      - name: Check for CRITICAL vulnerabilities
+      - name: Check for critical vulnerabilities
         run: |
-          if grep -q '"severity":"CRITICAL"' trivy-results-*.sarif; then
-            echo "CRITICAL vulnerabilities found!"
+          if grep -q '"severity":"CRITICAL"' trivy-*.sarif 2>/dev/null; then
+            echo "CRITICAL vulnerabilities found"
             exit 1
           fi
           echo "No CRITICAL vulnerabilities found"
@@ -210,10 +182,9 @@ jobs:
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Create .env file for testing
+      - name: Create .env file
         run: |
           cat > .env << EOF
           REDIS_HOST=redis
@@ -232,32 +203,36 @@ jobs:
           sleep 30
           for i in {1..30}; do
             if curl -f http://localhost:3000/health; then
-              echo "Frontend is ready"
-              break
+              echo "Services are ready"
+              exit 0
             fi
-            echo "Waiting for frontend... (attempt $i/30)"
+            echo "Attempt $i/30 - Waiting for frontend..."
             sleep 5
           done
+          echo "Services failed to start"
+          exit 1
       
-      - name: Run integration tests
+      - name: Test job submission
         run: |
-          sudo apt-get update && sudo apt-get install -y jq
+          sudo apt-get update
+          sudo apt-get install -y jq
           
           echo "Submitting test job..."
           RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
-          echo $RESPONSE
-          JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          echo "Response: $RESPONSE"
           
+          JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
-            echo "Failed to get job ID"
+            echo "Failed to create job"
             exit 1
           fi
           
           echo "Job ID: $JOB_ID"
           
           for i in {1..30}; do
-            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
-            echo "Attempt $i/30 - Job status: $STATUS"
+            STATUS_RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
+            STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
+            echo "Attempt $i/30 - Status: $STATUS"
             
             if [ "$STATUS" = "completed" ]; then
               echo "Job completed successfully!"
@@ -272,33 +247,32 @@ jobs:
           echo "Job did not complete within timeout"
           exit 1
       
-      - name: Debug logs
+      - name: Debug logs on failure
         if: failure()
         run: |
           echo "=== Docker Compose Logs ==="
           docker compose logs
-          echo "=== Redis Data ==="
-          docker exec job-queue-redis redis-cli LRANGE job 0 -1
+          echo "=== Redis Queue Contents ==="
+          docker exec job-queue-redis redis-cli LRANGE job 0 -1 || echo "Redis not accessible"
       
-      - name: Tear down stack
+      - name: Cleanup
         if: always()
         run: docker compose down -v
 
   deploy:
     needs: integration-test
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Deploy with rolling update
         run: |
-          echo "Starting rolling update deployment..."
+          echo "Starting deployment..."
           
-          docker pull ${{ env.REGISTRY }}/api:latest
-          docker pull ${{ env.REGISTRY }}/worker:latest
-          docker pull ${{ env.REGISTRY }}/frontend:latest
+          docker pull localhost:5000/api:latest
+          docker pull localhost:5000/worker:latest
+          docker pull localhost:5000/frontend:latest
           
           docker compose down
           docker compose up -d
@@ -308,31 +282,19 @@ jobs:
           
           for service in api worker frontend; do
             CONTAINER_NAME="job-queue-$service"
-            for i in {1..12}; do
-              HEALTH_STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER_NAME 2>/dev/null)
-              echo "Service $service health status: $HEALTH_STATUS"
-              
-              if [ "$HEALTH_STATUS" = "healthy" ]; then
-                echo "$service is healthy"
-                break
-              elif [ "$HEALTH_STATUS" = "unhealthy" ]; then
-                echo "$service is unhealthy! Rolling back..."
-                docker compose down
-                exit 1
-              fi
-              
-              if [ $i -eq 12 ]; then
-                echo "$service health check timeout after 60 seconds"
-                docker compose down
-                exit 1
-              fi
-              sleep 5
-            done
+            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER_NAME 2>/dev/null)
+            echo "Service $service health: $HEALTH"
+            
+            if [ "$HEALTH" != "healthy" ]; then
+              echo "Service $service is not healthy! Rolling back..."
+              docker compose down
+              exit 1
+            fi
           done
           
           echo "Deployment successful! All services are healthy."
-      
+          
       - name: Verify deployment
         run: |
           curl -f http://localhost:3000/health || exit 1
-          echo "Deployment verified successfully"
+          echo "Deployment verified"
