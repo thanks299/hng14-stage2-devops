@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 import time
 
+
 # Configure logging
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
@@ -16,8 +17,9 @@ REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 REDIS_DB = int(os.getenv('REDIS_DB', 0))
 REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', None)
 
-# Redis connection with retry
+
 def get_redis_connection():
+    """Create Redis connection with retry logic"""
     retries = 5
     while retries > 0:
         try:
@@ -32,23 +34,28 @@ def get_redis_connection():
             r.ping()
             logger.info(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
             return r
-        except redis.ConnectionError as e:
+        except redis.ConnectionError:
             retries -= 1
             logger.warning(f"Redis connection failed, retries left: {retries}")
             time.sleep(2)
     raise Exception("Could not connect to Redis")
 
+
 r = get_redis_connection()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Handle startup and shutdown events"""
     # Startup
     logger.info("API Service Starting...")
     yield
     # Shutdown
     logger.info("API Service Shutting down...")
 
+
 app = FastAPI(lifespan=lifespan)
+
 
 @app.get("/health")
 async def health_check():
@@ -56,11 +63,13 @@ async def health_check():
     try:
         r.ping()
         return {"status": "healthy", "redis": "connected"}
-    except redis.ConnectionError:
-        raise HTTPException(status_code=503, detail="Redis connection failed")
+    except redis.ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Redis connection failed") from exc
+
 
 @app.post("/jobs")
 async def create_job():
+    """Create a new job"""
     try:
         job_id = str(uuid.uuid4())
         r.lpush("job", job_id)
@@ -69,10 +78,12 @@ async def create_job():
         return {"job_id": job_id}
     except Exception as e:
         logger.error(f"Failed to create job: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create job")
+        raise HTTPException(status_code=500, detail="Failed to create job") from e
+
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
+    """Get job status by ID"""
     try:
         status = r.hget(f"job:{job_id}", "status")
         if not status:
@@ -82,4 +93,4 @@ async def get_job(job_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get job {job_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve job status")
+        raise HTTPException(status_code=500, detail="Failed to retrieve job status") from e

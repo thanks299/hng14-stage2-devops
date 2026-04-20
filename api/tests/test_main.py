@@ -1,22 +1,26 @@
-import pytest
-from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch
+"""Unit tests for the API service"""
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fastapi.testclient import TestClient
+from unittest.mock import patch
 from main import app
+
 
 client = TestClient(app)
 
+
 def test_health_check():
-    """Test health check endpoint"""
+    """Test health check endpoint when Redis is healthy"""
     with patch('main.r') as mock_redis:
         mock_redis.ping.return_value = True
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
+
 
 def test_health_check_redis_failure():
     """Test health check when Redis is down"""
@@ -24,6 +28,7 @@ def test_health_check_redis_failure():
         mock_redis.ping.side_effect = Exception("Connection failed")
         response = client.get("/health")
         assert response.status_code == 503
+
 
 def test_create_job():
     """Test job creation endpoint"""
@@ -34,12 +39,14 @@ def test_create_job():
         assert response.status_code == 200
         assert "job_id" in response.json()
 
+
 def test_get_job_not_found():
     """Test getting non-existent job"""
     with patch('main.r') as mock_redis:
         mock_redis.hget.return_value = None
         response = client.get("/jobs/nonexistent-id")
         assert response.status_code == 404
+
 
 def test_get_job_found():
     """Test getting existing job"""
