@@ -3,6 +3,7 @@ FROM node:18-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
+# Now that we have package-lock.json, we can use npm ci (faster and more reliable)
 RUN npm ci --only=production
 
 FROM node:18-alpine
