@@ -99,7 +99,7 @@ jobs:
           path: api/htmlcov/
           retention-days: 7
 
-  build:
+  build-and-scan:
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -108,72 +108,43 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      - name: Start Docker registry
-        run: |
-          docker run -d -p 5000:5000 --name registry registry:2
-          # Wait for registry to be ready
-          sleep 5
-      
       - name: Build API image
-        run: |
-          docker build -t ${{ env.REGISTRY }}/api:${{ github.sha }} ./api
-          docker tag ${{ env.REGISTRY }}/api:${{ github.sha }} ${{ env.REGISTRY }}/api:latest
-          docker push ${{ env.REGISTRY }}/api:${{ github.sha }}
-          docker push ${{ env.REGISTRY }}/api:latest
+        run: docker build -t api:${{ github.sha }} ./api
       
       - name: Build Worker image
-        run: |
-          docker build -t ${{ env.REGISTRY }}/worker:${{ github.sha }} ./worker
-          docker tag ${{ env.REGISTRY }}/worker:${{ github.sha }} ${{ env.REGISTRY }}/worker:latest
-          docker push ${{ env.REGISTRY }}/worker:${{ github.sha }}
-          docker push ${{ env.REGISTRY }}/worker:latest
+        run: docker build -t worker:${{ github.sha }} ./worker
       
       - name: Build Frontend image
-        run: |
-          docker build -t ${{ env.REGISTRY }}/frontend:${{ github.sha }} ./frontend
-          docker tag ${{ env.REGISTRY }}/frontend:${{ github.sha }} ${{ env.REGISTRY }}/frontend:latest
-          docker push ${{ env.REGISTRY }}/frontend:${{ github.sha }}
-          docker push ${{ env.REGISTRY }}/frontend:latest
+        run: docker build -t frontend:${{ github.sha }} ./frontend
       
-      - name: Verify images in registry
+      - name: Tag images as latest
         run: |
-          curl -X GET http://localhost:5000/v2/_catalog
-          docker images
-
-  security-scan:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+          docker tag api:${{ github.sha }} api:latest
+          docker tag worker:${{ github.sha }} worker:latest
+          docker tag frontend:${{ github.sha }} frontend:latest
       
-      - name: Pull images from registry
-        run: |
-          docker pull ${{ env.REGISTRY }}/api:${{ github.sha }}
-          docker pull ${{ env.REGISTRY }}/worker:${{ github.sha }}
-          docker pull ${{ env.REGISTRY }}/frontend:${{ github.sha }}
-      
-      - name: Scan API
+      - name: Scan API with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/api:${{ github.sha }}
+          image-ref: api:${{ github.sha }}
           format: sarif
           output: trivy-api.sarif
           severity: CRITICAL,HIGH
           exit-code: 0
       
-      - name: Scan Worker
+      - name: Scan Worker with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/worker:${{ github.sha }}
+          image-ref: worker:${{ github.sha }}
           format: sarif
           output: trivy-worker.sarif
           severity: CRITICAL,HIGH
           exit-code: 0
       
-      - name: Scan Frontend
+      - name: Scan Frontend with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/frontend:${{ github.sha }}
+          image-ref: frontend:${{ github.sha }}
           format: sarif
           output: trivy-frontend.sarif
           severity: CRITICAL,HIGH
@@ -188,16 +159,45 @@ jobs:
         run: |
           if grep -q '"severity":"CRITICAL"' trivy-*.sarif 2>/dev/null; then
             echo "CRITICAL vulnerabilities found!"
-            cat trivy-*.sarif | grep -A 5 -B 5 '"severity":"CRITICAL"'
             exit 1
           fi
           echo "No CRITICAL vulnerabilities found"
+      
+      - name: Save images for integration tests
+        run: |
+          docker save api:${{ github.sha }} -o api-image.tar
+          docker save worker:${{ github.sha }} -o worker-image.tar
+          docker save frontend:${{ github.sha }} -o frontend-image.tar
+      
+      - name: Upload images artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: |
+            api-image.tar
+            worker-image.tar
+            frontend-image.tar
+          retention-days: 1
 
   integration-test:
-    needs: security-scan
+    needs: build-and-scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Download images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+      
+      - name: Load images
+        run: |
+          docker load -i api-image.tar
+          docker load -i worker-image.tar
+          docker load -i frontend-image.tar
+          docker tag api:${{ github.sha }} api:latest
+          docker tag worker:${{ github.sha }} worker:latest
+          docker tag frontend:${{ github.sha }} frontend:latest
       
       - name: Create .env file
         run: |
@@ -257,11 +257,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Download images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+      
+      - name: Load images
+        run: |
+          docker load -i api-image.tar
+          docker load -i worker-image.tar
+          docker load -i frontend-image.tar
+          docker tag api:${{ github.sha }} api:latest
+          docker tag worker:${{ github.sha }} worker:latest
+          docker tag frontend:${{ github.sha }} frontend:latest
+      
       - name: Deploy
         run: |
-          docker pull ${{ env.REGISTRY }}/api:latest
-          docker pull ${{ env.REGISTRY }}/worker:latest
-          docker pull ${{ env.REGISTRY }}/frontend:latest
           docker compose down
           docker compose up -d
           sleep 30
