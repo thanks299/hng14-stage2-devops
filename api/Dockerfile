@@ -8,7 +8,7 @@ RUN pip install --user --no-cache-dir -r requirements.txt
 # Stage 2: Final
 FROM python:3.11-slim
 
-# Create non-root user properly
+# Create non-root user
 RUN addgroup --system --gid 1001 appuser && \
     adduser --system --uid 1001 --ingroup appuser --no-create-home appuser && \
     mkdir -p /app && \
@@ -16,14 +16,15 @@ RUN addgroup --system --gid 1001 appuser && \
 
 WORKDIR /app
 
-# Copy dependencies from builder
+# Copy dependencies from builder - IMPORTANT: copy to the correct location
 COPY --from=builder /root/.local /home/appuser/.local
 
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Set PATH
+# Set PATH for the non-root user to find installed packages
 ENV PATH=/home/appuser/.local/bin:$PATH
+ENV PYTHONPATH=/home/appuser/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Switch to non-root user
 USER appuser
