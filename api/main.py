@@ -99,7 +99,13 @@ async def create_job():
         raise HTTPException(status_code=500, detail="Failed to create job")
 
 
-@app.get("/jobs/{job_id}", responses={404: {"description": "Job not found"}, 500: {"description": "Failed to retrieve job status"}})
+@app.get(
+    "/jobs/{job_id}",
+    responses={
+        404: {"description": "Job not found"},
+        500: {"description": "Failed to retrieve job status"}
+    }
+)
 async def get_job(job_id: str):
     """Get job status by ID"""
     try:
