@@ -1,11 +1,11 @@
-# Multi-stage build for frontend
+# Stage 1: Builder
 FROM node:18-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
-# Use npm install if no lock file, otherwise npm ci
-RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi
+RUN npm ci --only=production
 
+# Stage 2: Final
 FROM node:18-alpine
 
 # Create non-root user
@@ -24,8 +24,8 @@ COPY --chown=nodejs:nodejs . .
 USER nodejs
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=5 \
+  CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)}).on('error', () => process.exit(1))"
 
 EXPOSE 3000
 

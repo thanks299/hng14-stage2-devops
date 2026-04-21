@@ -71,6 +71,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "Job Processing API", "version": "1.0.0"}
 
 @app.get("/health", responses={503: {"description": "Redis connection failed"}})
 async def health_check():

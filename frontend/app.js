@@ -1,6 +1,6 @@
 const express = require('express');
 const axios = require('axios');
-const path = require('path');
+const path = require('node:path');
 require('dotenv').config();
 
 const app = express();
@@ -45,7 +45,7 @@ app.get('/status/:id', async (req, res) => {
         res.json(response.data);
     } catch (err) {
         console.error('Error checking status:', err.message);
-        if (err.response && err.response.status === 404) {
+        if (err.response?.status === 404) {
             res.status(404).json({ error: "Job not found" });
         } else if (err.response) {
             res.status(err.response.status).json({ 
@@ -61,7 +61,12 @@ app.get('/status/:id', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'healthy', service: 'frontend' });
+    res.json({ status: 'healthy', service: 'frontend', timestamp: new Date().toISOString() });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'views', 'index.html'));
 });
 
 const server = app.listen(PORT, () => {

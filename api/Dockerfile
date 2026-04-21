@@ -1,14 +1,16 @@
-# Multi-stage build for API service
+# Stage 1: Builder
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --user --no-cache-dir -r requirements.txt
 
+# Stage 2: Final
 FROM python:3.11-slim
 
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser && \
+# Create non-root user properly
+RUN addgroup --system --gid 1001 appuser && \
+    adduser --system --uid 1001 --ingroup appuser --no-create-home appuser && \
     mkdir -p /app && \
     chown -R appuser:appuser /app
 
@@ -20,14 +22,14 @@ COPY --from=builder /root/.local /home/appuser/.local
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Make sure scripts in .local are usable
+# Set PATH
 ENV PATH=/home/appuser/.local/bin:$PATH
 
 # Switch to non-root user
 USER appuser
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 EXPOSE 8000
