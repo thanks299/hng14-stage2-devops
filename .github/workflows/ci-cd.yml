@@ -326,19 +326,19 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose down -v
-        
+
   deploy:
     needs: integration-test
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+ 
       - name: Download images
         uses: actions/download-artifact@v4
         with:
           name: docker-images
-      
+ 
       - name: Load images
         run: |
           docker load -i api-image.tar
@@ -347,17 +347,118 @@ jobs:
           docker tag api:${{ github.sha }} api:latest
           docker tag worker:${{ github.sha }} worker:latest
           docker tag frontend:${{ github.sha }} frontend:latest
-      
-      - name: Deploy
+ 
+      - name: Ensure stack is running (initial deploy if needed)
         run: |
-          docker compose down
-          docker compose up -d
-          sleep 30
-          for service in api worker frontend; do
-            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' job-queue-$service)
-            if [ "$HEALTH" != "healthy" ]; then
-              docker compose down
+          # If nothing is running yet, do a clean first-time startup and exit.
+          # On subsequent runs this is skipped and the rolling update below takes over.
+          if ! docker ps --format '{{.Names}}' | grep -q "job-queue"; then
+            echo "No existing stack found — performing initial deployment."
+            docker compose -f docker-compose.yml up -d
+            echo "Initial deployment done."
+            exit 0
+          fi
+          echo "Existing stack detected — proceeding with rolling update."
+ 
+      - name: Rolling update
+        # For each service:
+        #   1. Start the NEW container under a temporary name
+        #   2. Wait up to 60s for it to pass its HEALTHCHECK
+        #   3. If healthy  → stop+remove the OLD container, rename NEW → canonical name
+        #   4. If unhealthy → remove the NEW container, leave OLD running, fail the pipeline
+        #
+        # Order matters: update stateless services (api, worker) before frontend
+        # so the frontend's dependency (api) is already on the new version.
+        run: |
+          set -euo pipefail
+ 
+          SERVICES=("api" "worker" "frontend")
+          SHA="${{ github.sha }}"
+ 
+          # Helper: wait for a container to become healthy (max 60s)
+          wait_healthy() {
+            local container="$1"
+            local deadline=$((SECONDS + 60))
+            echo "  Waiting for $container to become healthy (timeout 60s)..."
+            while [ $SECONDS -lt $deadline ]; do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
+              echo "    health = $STATUS"
+              if [ "$STATUS" = "healthy" ]; then
+                return 0
+              fi
+              sleep 3
+            done
+            echo "  ERROR: $container did not become healthy within 60 seconds."
+            return 1
+          }
+ 
+          for SERVICE in "${SERVICES[@]}"; do
+            OLD="job-queue-${SERVICE}"
+            NEW="job-queue-${SERVICE}-new"
+ 
+            echo ""
+            echo "══════════════════════════════════════"
+            echo " Rolling update: $SERVICE"
+            echo "══════════════════════════════════════"
+ 
+            # ── Step 1: get the run flags from docker inspect on the old container ──
+            # We re-use docker compose to spin up the new container so all env/network
+            # config from docker-compose.yml is respected automatically — but we give it
+            # a temporary container name so the old one keeps serving traffic.
+            echo "  Starting new $SERVICE container..."
+            docker compose -f docker-compose.yml run \
+              --name "$NEW" \
+              --detach \
+              --no-deps \
+              "$SERVICE"
+ 
+            # ── Step 2: health check ──
+            if wait_healthy "$NEW"; then
+              echo "  New $SERVICE container is healthy."
+ 
+              # ── Step 3: swap ──
+              echo "  Stopping old container: $OLD"
+              docker stop "$OLD" 2>/dev/null || true
+              docker rm "$OLD" 2>/dev/null || true
+ 
+              echo "  Renaming $NEW → $OLD"
+              docker rename "$NEW" "$OLD"
+ 
+              echo "  $SERVICE updated successfully."
+            else
+              # ── Step 4: abort, leave old container running ──
+              echo "  Rolling back: removing failed new container."
+              docker rm -f "$NEW" 2>/dev/null || true
+              echo "  Old $SERVICE container is still running — deployment aborted."
               exit 1
             fi
           done
-          echo "Deployment successful"
+ 
+          echo ""
+          echo "All services updated successfully."
+ 
+      - name: Verify final stack health
+        run: |
+          echo "Final health check on all containers..."
+          ALL_HEALTHY=true
+          for SERVICE in api worker frontend; do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' "job-queue-${SERVICE}" 2>/dev/null || echo "missing")
+            echo "  job-queue-$SERVICE → $STATUS"
+            if [ "$STATUS" != "healthy" ]; then
+              ALL_HEALTHY=false
+            fi
+          done
+ 
+          if [ "$ALL_HEALTHY" = "false" ]; then
+            echo "ERROR: One or more services are not healthy after deployment."
+            exit 1
+          fi
+          echo "Deployment verified — all services healthy."
+ 
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Container statuses ==="
+          docker ps -a
+          echo "=== Compose logs ==="
+          docker compose -f docker-compose.yml logs
