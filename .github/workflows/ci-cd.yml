@@ -219,12 +219,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+ 
       - name: Download images
         uses: actions/download-artifact@v4
         with:
           name: docker-images
-      
+ 
       - name: Load images
         run: |
           docker load -i api-image.tar
@@ -233,7 +233,7 @@ jobs:
           docker tag api:${{ github.sha }} api:latest
           docker tag worker:${{ github.sha }} worker:latest
           docker tag frontend:${{ github.sha }} frontend:latest
-      
+ 
       - name: Create .env file
         run: |
           cat > .env << EOF
@@ -243,48 +243,90 @@ jobs:
           FRONTEND_PORT=3000
           LOG_LEVEL=INFO
           EOF
-      
+ 
       - name: Start services
         run: docker compose -f docker-compose.yml up -d
-      
-      - name: Wait for services
+ 
+      - name: Wait for API to be healthy
+        # FIX: Poll the API container health directly via Docker instead of
+        # curl-ing through the frontend (which isn't up yet). This gives us a
+        # precise signal rather than a blind sleep.
         run: |
-          echo "Waiting for services..."
-          sleep 30
+          echo "Waiting for API container to become healthy..."
           for i in {1..30}; do
-            if curl -f http://localhost:3000/health; then
-              echo "Services ready"
-              exit 0
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' job-queue-api 2>/dev/null || echo "not_found")
+            echo "  Attempt $i: API health = $STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "API is healthy!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "API never became healthy. Container logs:"
+              docker compose logs api
+              exit 1
             fi
             sleep 5
           done
-          exit 1
-      
-      - name: Test job submission
+ 
+      - name: Wait for frontend to be reachable
         run: |
-          sudo apt-get update && sudo apt-get install -y jq
-          RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
-          JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          echo "Waiting for frontend..."
+          for i in {1..24}; do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Frontend is up!"
+              break
+            fi
+            echo "  Attempt $i: frontend not ready yet"
+            if [ $i -eq 24 ]; then
+              echo "Frontend never became reachable. Logs:"
+              docker compose logs frontend
+              exit 1
+            fi
+            sleep 5
+          done
+ 
+      - name: Test job submission and completion
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq
+ 
+          # Submit a job
+          RESPONSE=$(curl -sf -X POST http://localhost:3000/submit)
+          echo "Submit response: $RESPONSE"
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id')
+ 
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "ERROR: No job_id in response"
             exit 1
           fi
+          echo "Job created: $JOB_ID"
+ 
+          # Poll until completed (max 60s)
           for i in {1..30}; do
-            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
+            STATUS=$(curl -sf http://localhost:3000/status/$JOB_ID | jq -r '.status')
+            echo "  Poll $i: status = $STATUS"
             if [ "$STATUS" = "completed" ]; then
+              echo "Job completed successfully!"
               exit 0
             fi
             sleep 2
           done
+ 
+          echo "ERROR: Job never completed. Worker logs:"
+          docker compose logs worker
           exit 1
-      
-      - name: Debug
+ 
+      - name: Debug on failure
         if: failure()
-        run: docker compose logs
-      
+        run: |
+          echo "=== All container statuses ==="
+          docker ps -a
+          echo "=== Compose logs ==="
+          docker compose logs
+ 
       - name: Cleanup
         if: always()
         run: docker compose down -v
-
+        
   deploy:
     needs: integration-test
     if: github.ref == 'refs/heads/main'

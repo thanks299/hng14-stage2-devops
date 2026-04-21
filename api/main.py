@@ -50,7 +50,7 @@ def get_redis_connection():
             retries -= 1
             logger.warning(f"Redis connection failed, retries left: {retries}")
             time.sleep(2)
-    raise Exception("Could not connect to Redis")
+    raise redis.ConnectionError("Could not connect to Redis")
 
 
 @asynccontextmanager
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/health")
+@app.get("/health", responses={503: {"description": "Redis connection failed"}})
 async def health_check():
     """Health check endpoint for container orchestration"""
     try:
@@ -84,7 +84,7 @@ async def health_check():
         raise HTTPException(status_code=503, detail="Redis connection failed")
 
 
-@app.post("/jobs")
+@app.post("/jobs", responses={500: {"description": "Failed to create job"}})
 async def create_job():
     """Create a new job"""
     try:
@@ -99,7 +99,7 @@ async def create_job():
         raise HTTPException(status_code=500, detail="Failed to create job")
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", responses={404: {"description": "Job not found"}, 500: {"description": "Failed to retrieve job status"}})
 async def get_job(job_id: str):
     """Get job status by ID"""
     try:
