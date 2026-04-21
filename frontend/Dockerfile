@@ -3,8 +3,8 @@ FROM node:18-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
-# Now that we have package-lock.json, we can use npm ci (faster and more reliable)
-RUN npm ci --only=production
+# Use npm install if no lock file, otherwise npm ci
+RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi
 
 FROM node:18-alpine
 

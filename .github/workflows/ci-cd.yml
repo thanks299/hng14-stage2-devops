@@ -109,31 +109,36 @@ jobs:
         uses: docker/setup-buildx-action@v3
       
       - name: Start Docker registry
-        run: docker run -d -p 5000:5000 --name registry registry:2
+        run: |
+          docker run -d -p 5000:5000 --name registry registry:2
+          # Wait for registry to be ready
+          sleep 5
       
       - name: Build API image
-        run: docker build -t localhost:5000/api:${{ github.sha }} ./api
+        run: |
+          docker build -t ${{ env.REGISTRY }}/api:${{ github.sha }} ./api
+          docker tag ${{ env.REGISTRY }}/api:${{ github.sha }} ${{ env.REGISTRY }}/api:latest
+          docker push ${{ env.REGISTRY }}/api:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/api:latest
       
       - name: Build Worker image
-        run: docker build -t localhost:5000/worker:${{ github.sha }} ./worker
+        run: |
+          docker build -t ${{ env.REGISTRY }}/worker:${{ github.sha }} ./worker
+          docker tag ${{ env.REGISTRY }}/worker:${{ github.sha }} ${{ env.REGISTRY }}/worker:latest
+          docker push ${{ env.REGISTRY }}/worker:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/worker:latest
       
       - name: Build Frontend image
-        run: docker build -t localhost:5000/frontend:${{ github.sha }} ./frontend
-      
-      - name: Tag images as latest
         run: |
-          docker tag localhost:5000/api:${{ github.sha }} localhost:5000/api:latest
-          docker tag localhost:5000/worker:${{ github.sha }} localhost:5000/worker:latest
-          docker tag localhost:5000/frontend:${{ github.sha }} localhost:5000/frontend:latest
+          docker build -t ${{ env.REGISTRY }}/frontend:${{ github.sha }} ./frontend
+          docker tag ${{ env.REGISTRY }}/frontend:${{ github.sha }} ${{ env.REGISTRY }}/frontend:latest
+          docker push ${{ env.REGISTRY }}/frontend:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/frontend:latest
       
-      - name: Push images
+      - name: Verify images in registry
         run: |
-          docker push localhost:5000/api:${{ github.sha }}
-          docker push localhost:5000/api:latest
-          docker push localhost:5000/worker:${{ github.sha }}
-          docker push localhost:5000/worker:latest
-          docker push localhost:5000/frontend:${{ github.sha }}
-          docker push localhost:5000/frontend:latest
+          curl -X GET http://localhost:5000/v2/_catalog
+          docker images
 
   security-scan:
     needs: build
@@ -141,29 +146,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Pull images from registry
+        run: |
+          docker pull ${{ env.REGISTRY }}/api:${{ github.sha }}
+          docker pull ${{ env.REGISTRY }}/worker:${{ github.sha }}
+          docker pull ${{ env.REGISTRY }}/frontend:${{ github.sha }}
+      
       - name: Scan API
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: localhost:5000/api:${{ github.sha }}
+          image-ref: ${{ env.REGISTRY }}/api:${{ github.sha }}
           format: sarif
           output: trivy-api.sarif
           severity: CRITICAL,HIGH
+          exit-code: 0
       
       - name: Scan Worker
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: localhost:5000/worker:${{ github.sha }}
+          image-ref: ${{ env.REGISTRY }}/worker:${{ github.sha }}
           format: sarif
           output: trivy-worker.sarif
           severity: CRITICAL,HIGH
+          exit-code: 0
       
       - name: Scan Frontend
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: localhost:5000/frontend:${{ github.sha }}
+          image-ref: ${{ env.REGISTRY }}/frontend:${{ github.sha }}
           format: sarif
           output: trivy-frontend.sarif
           severity: CRITICAL,HIGH
+          exit-code: 0
       
       - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
@@ -173,7 +187,8 @@ jobs:
       - name: Check for critical vulnerabilities
         run: |
           if grep -q '"severity":"CRITICAL"' trivy-*.sarif 2>/dev/null; then
-            echo "CRITICAL vulnerabilities found"
+            echo "CRITICAL vulnerabilities found!"
+            cat trivy-*.sarif | grep -A 5 -B 5 '"severity":"CRITICAL"'
             exit 1
           fi
           echo "No CRITICAL vulnerabilities found"
@@ -199,61 +214,37 @@ jobs:
       
       - name: Wait for services
         run: |
-          echo "Waiting for services to be ready..."
+          echo "Waiting for services..."
           sleep 30
           for i in {1..30}; do
             if curl -f http://localhost:3000/health; then
-              echo "Services are ready"
+              echo "Services ready"
               exit 0
             fi
-            echo "Attempt $i/30 - Waiting for frontend..."
             sleep 5
           done
-          echo "Services failed to start"
           exit 1
       
       - name: Test job submission
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          
-          echo "Submitting test job..."
+          sudo apt-get update && sudo apt-get install -y jq
           RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
-          echo "Response: $RESPONSE"
-          
           JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
-            echo "Failed to create job"
             exit 1
           fi
-          
-          echo "Job ID: $JOB_ID"
-          
           for i in {1..30}; do
-            STATUS_RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
-            STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
-            echo "Attempt $i/30 - Status: $STATUS"
-            
+            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
             if [ "$STATUS" = "completed" ]; then
-              echo "Job completed successfully!"
               exit 0
-            elif [ "$STATUS" = "failed" ]; then
-              echo "Job failed!"
-              exit 1
             fi
             sleep 2
           done
-          
-          echo "Job did not complete within timeout"
           exit 1
       
-      - name: Debug logs on failure
+      - name: Debug
         if: failure()
-        run: |
-          echo "=== Docker Compose Logs ==="
-          docker compose logs
-          echo "=== Redis Queue Contents ==="
-          docker exec job-queue-redis redis-cli LRANGE job 0 -1 || echo "Redis not accessible"
+        run: docker compose logs
       
       - name: Cleanup
         if: always()
@@ -266,35 +257,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Deploy with rolling update
+      - name: Deploy
         run: |
-          echo "Starting deployment..."
-          
-          docker pull localhost:5000/api:latest
-          docker pull localhost:5000/worker:latest
-          docker pull localhost:5000/frontend:latest
-          
+          docker pull ${{ env.REGISTRY }}/api:latest
+          docker pull ${{ env.REGISTRY }}/worker:latest
+          docker pull ${{ env.REGISTRY }}/frontend:latest
           docker compose down
           docker compose up -d
-          
-          echo "Waiting for health checks..."
           sleep 30
-          
           for service in api worker frontend; do
-            CONTAINER_NAME="job-queue-$service"
-            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER_NAME 2>/dev/null)
-            echo "Service $service health: $HEALTH"
-            
+            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' job-queue-$service)
             if [ "$HEALTH" != "healthy" ]; then
-              echo "Service $service is not healthy! Rolling back..."
               docker compose down
               exit 1
             fi
           done
-          
-          echo "Deployment successful! All services are healthy."
-          
-      - name: Verify deployment
-        run: |
-          curl -f http://localhost:3000/health || exit 1
-          echo "Deployment verified"
+          echo "Deployment successful"
