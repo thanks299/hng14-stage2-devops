@@ -1,0 +1,731 @@
+ this is my docker -compose .yml file: # version: '3.8' - Remove this line to avoid warning
+
+networks:
+  internal:
+    driver: bridge
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: job-queue-redis
+    restart: unless-stopped
+    networks:
+      - internal
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: ./api
+    container_name: job-queue-api
+    restart: unless-stopped
+    networks:
+      - internal
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  worker:
+    build: ./worker
+    container_name: job-queue-worker
+    restart: unless-stopped
+    networks:
+      - internal
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - WORKER_POLL_INTERVAL=5
+      - LOG_LEVEL=INFO
+      - HEALTH_PORT=8080
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis, os; r=redis.Redis(host=os.getenv('REDIS_HOST','redis'), port=int(os.getenv('REDIS_PORT',6379))); r.ping()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  frontend:
+    build: ./frontend
+    container_name: job-queue-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - internal
+    environment:
+      - FRONTEND_PORT=3000
+      - API_URL=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)}).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  redis-data:
+    driver: local
+this is my test_main.py: """Unit tests for the API service"""
+from fastapi.testclient import TestClient
+from unittest.mock import patch, MagicMock
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from main import app
+
+client = TestClient(app)
+
+
+def test_health_check_endpoint():
+    """Test 1: Health check endpoint returns healthy status"""
+    with patch('main.get_redis_connection') as mock_redis:
+        mock_instance = MagicMock()
+        mock_instance.ping.return_value = True
+        mock_redis.return_value = mock_instance
+        
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "healthy"
+        assert response.json()["redis"] == "connected"
+
+
+def test_create_job_endpoint():
+    """Test 2: Job creation endpoint creates new job"""
+    with patch('main.get_redis_connection') as mock_redis:
+        mock_instance = MagicMock()
+        mock_instance.lpush.return_value = 1
+        mock_instance.hset.return_value = 1
+        mock_redis.return_value = mock_instance
+        
+        response = client.post("/jobs")
+        assert response.status_code == 200
+        assert "job_id" in response.json()
+        # Note: Some API versions return status, some don't
+        # Make test flexible to handle both
+        if "status" in response.json():
+            assert response.json()["status"] == "queued"
+
+
+def test_get_job_not_found():
+    """Test 3: Get non-existent job returns 404"""
+    with patch('main.get_redis_connection') as mock_redis:
+        mock_instance = MagicMock()
+        mock_instance.hget.return_value = None
+        mock_redis.return_value = mock_instance
+        
+        response = client.get("/jobs/nonexistent-123")
+        assert response.status_code == 404
+        assert "detail" in response.json()
+
+
+def test_get_job_found():
+    """Test 4: Get existing job returns status"""
+    with patch('main.get_redis_connection') as mock_redis:
+        mock_instance = MagicMock()
+        mock_instance.hget.return_value = "completed"
+        mock_redis.return_value = mock_instance
+        
+        response = client.get("/jobs/existing-123")
+        assert response.status_code == 200
+        assert response.json()["job_id"] == "existing-123"
+        assert response.json()["status"] == "completed"
+
+
+def test_health_check_redis_failure():
+    """Test 5: Health check fails when Redis is down"""
+    with patch('main.get_redis_connection') as mock_redis:
+        mock_redis.side_effect = Exception("Redis connection failed")
+        
+        response = client.get("/health")
+        assert response.status_code == 503
+        assert "Redis connection failed" in response.json()["detail"]
+
+
+def test_root_endpoint():
+    """Test 6: Root endpoint returns API info"""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "message" in response.json()
+    assert "Job Processing API" in response.json()["message"]
+this is my integration-test.sh file: #!/bin/bash
+set -e
+
+echo "=========================================="
+echo "Starting integration tests"
+echo "=========================================="
+
+# Function to check if a service is responding
+check_service() {
+    local url=$1
+    local name=$2
+    local max_attempts=30
+    local attempt=1
+    
+    echo "Waiting for $name to be ready..."
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf "$url" > /dev/null 2>&1; then
+            echo "✓ $name is ready (attempt $attempt)"
+            return 0
+        fi
+        echo "  Attempt $attempt/$max_attempts: $name not ready yet..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    
+    echo "✗ $name failed to become ready within timeout"
+    return 1
+}
+
+# Wait for containers to start
+echo ""
+echo "Step 1: Waiting for containers to start..."
+sleep 20
+
+# Check API health
+check_service "http://localhost:8000/health" "API" || exit 1
+
+# Check frontend health
+check_service "http://localhost:3000/health" "Frontend" || exit 1
+
+# Submit a job
+echo ""
+echo "Step 2: Submitting a test job..."
+RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
+echo "Response: $RESPONSE"
+
+JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id')
+if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+    echo "✗ Failed to get job ID from response"
+    exit 1
+fi
+echo "✓ Job created with ID: $JOB_ID"
+
+# Poll for job completion
+echo ""
+echo "Step 3: Waiting for job to complete..."
+MAX_ATTEMPTS=60
+ATTEMPT=1
+COMPLETED=false
+
+while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+    STATUS_RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
+    STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status')
+    
+    echo "  Attempt $ATTEMPT/$MAX_ATTEMPTS: Job status = $STATUS"
+    
+    if [ "$STATUS" = "completed" ]; then
+        COMPLETED=true
+        echo "✓ Job completed successfully!"
+        break
+    elif [ "$STATUS" = "failed" ]; then
+        echo "✗ Job failed!"
+        exit 1
+    fi
+    
+    ATTEMPT=$((ATTEMPT + 1))
+    sleep 2
+done
+
+if [ "$COMPLETED" = false ]; then
+    echo "✗ Job did not complete within timeout"
+    echo ""
+    echo "Debug information:"
+    echo "Worker logs:"
+    docker logs job-queue-worker --tail 50 2>&1 || echo "Worker not running"
+    exit 1
+fi
+
+echo ""
+echo "=========================================="
+echo "All integration tests passed! ✓"
+echo "=========================================="
+this is my cicdyml file: name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+# Add permissions for CodeQL
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  checks: read
+
+env:
+  REGISTRY: localhost:5000
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      
+      - name: Install Python linters
+        run: pip install flake8 pylint
+      
+      - name: Lint API
+        run: flake8 api/ --max-line-length=120 --ignore=E203,W503,E402,E302,E305,W293
+      
+      - name: Lint Worker
+        run: flake8 worker/ --max-line-length=120 --ignore=E203,W503,E302,E305,W293
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '18'
+      
+      - name: Install JS linter
+        run: |
+          cd frontend
+          npm install -g eslint
+          npm install
+      
+      - name: Lint Frontend
+        run: |
+          cd frontend
+          eslint . --ext .js --max-warnings=0 || true
+      
+      - name: Lint API Dockerfile
+        uses: hadolint/hadolint-action@v3.0.0
+        with:
+          dockerfile: api/Dockerfile
+          failure-threshold: warning
+      
+      - name: Lint Worker Dockerfile
+        uses: hadolint/hadolint-action@v3.0.0
+        with:
+          dockerfile: worker/Dockerfile
+          failure-threshold: warning
+      
+      - name: Lint Frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.0.0
+        with:
+          dockerfile: frontend/Dockerfile
+          failure-threshold: warning
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      
+      - name: Install API dependencies
+        run: |
+          cd api
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+      
+      - name: Run API tests
+        run: |
+          cd api
+          python -m pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
+      
+      - name: Upload coverage
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-report
+          path: api/coverage.xml
+          retention-days: 7
+      
+      - name: Upload HTML coverage
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-html
+          path: api/htmlcov/
+          retention-days: 7
+
+  build-and-scan:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      
+      - name: Build API image
+        run: docker build -t api:${{ github.sha }} ./api
+      
+      - name: Build Worker image
+        run: docker build -t worker:${{ github.sha }} ./worker
+      
+      - name: Build Frontend image
+        run: docker build -t frontend:${{ github.sha }} ./frontend
+      
+      - name: Tag images as latest
+        run: |
+          docker tag api:${{ github.sha }} api:latest
+          docker tag worker:${{ github.sha }} worker:latest
+          docker tag frontend:${{ github.sha }} frontend:latest
+      
+      - name: Scan API with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: api:${{ github.sha }}
+          format: sarif
+          output: trivy-api.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 0
+      
+      - name: Scan Worker with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: worker:${{ github.sha }}
+          format: sarif
+          output: trivy-worker.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 0
+      
+      - name: Scan Frontend with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: frontend:${{ github.sha }}
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 0
+      
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-api.sarif
+          category: trivy-api
+        continue-on-error: true
+      
+      - name: Upload Trivy results for Worker
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-worker.sarif
+          category: trivy-worker
+        continue-on-error: true
+      
+      - name: Upload Trivy results for Frontend
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-frontend.sarif
+          category: trivy-frontend
+        continue-on-error: true
+      
+      - name: Check for critical vulnerabilities
+        run: |
+          CRITICAL_COUNT=0
+          for file in trivy-*.sarif; do
+            if [ -f "$file" ]; then
+              COUNT=$(grep -c '"severity":"CRITICAL"' "$file" || true)
+              CRITICAL_COUNT=$((CRITICAL_COUNT + COUNT))
+            fi
+          done
+          
+          if [ $CRITICAL_COUNT -gt 0 ]; then
+            echo "Found $CRITICAL_COUNT CRITICAL vulnerabilities!"
+            echo "Please review the security scan results."
+            exit 1
+          fi
+          echo "No CRITICAL vulnerabilities found"
+      
+      - name: Save images for integration tests
+        run: |
+          docker save api:${{ github.sha }} -o api-image.tar
+          docker save worker:${{ github.sha }} -o worker-image.tar
+          docker save frontend:${{ github.sha }} -o frontend-image.tar
+      
+      - name: Upload images artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: docker-images
+          path: |
+            api-image.tar
+            worker-image.tar
+            frontend-image.tar
+          retention-days: 1
+
+  integration-test:
+    needs: build-and-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+ 
+      - name: Download images
+        uses: actions/download-artifact@v5
+        with:
+          name: docker-images
+ 
+      - name: Load images
+        run: |
+          docker load -i api-image.tar
+          docker load -i worker-image.tar
+          docker load -i frontend-image.tar
+          docker tag api:${{ github.sha }} api:latest
+          docker tag worker:${{ github.sha }} worker:latest
+          docker tag frontend:${{ github.sha }} frontend:latest
+ 
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          API_URL=http://api:8000
+          FRONTEND_PORT=3000
+          LOG_LEVEL=INFO
+          EOF
+ 
+      - name: Start services
+        run: docker compose -f docker-compose.yml up -d
+ 
+      - name: Wait for API to be healthy
+        # FIX: Poll the API container health directly via Docker instead of
+        # curl-ing through the frontend (which isn't up yet). This gives us a
+        # precise signal rather than a blind sleep.
+        run: |
+          echo "Waiting for API container to become healthy..."
+          for i in {1..30}; do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' job-queue-api 2>/dev/null || echo "not_found")
+            echo "  Attempt $i: API health = $STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "API is healthy!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "API never became healthy. Container logs:"
+              docker compose logs api
+              exit 1
+            fi
+            sleep 5
+          done
+ 
+      - name: Wait for frontend to be reachable
+        run: |
+          echo "Waiting for frontend..."
+          for i in {1..24}; do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Frontend is up!"
+              break
+            fi
+            echo "  Attempt $i: frontend not ready yet"
+            if [ $i -eq 24 ]; then
+              echo "Frontend never became reachable. Logs:"
+              docker compose logs frontend
+              exit 1
+            fi
+            sleep 5
+          done
+ 
+      - name: Test job submission and completion
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq
+ 
+          # Submit a job
+          RESPONSE=$(curl -sf -X POST http://localhost:3000/submit)
+          echo "Submit response: $RESPONSE"
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id')
+ 
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "ERROR: No job_id in response"
+            exit 1
+          fi
+          echo "Job created: $JOB_ID"
+ 
+          # Poll until completed (max 60s)
+          for i in {1..30}; do
+            STATUS=$(curl -sf http://localhost:3000/status/$JOB_ID | jq -r '.status')
+            echo "  Poll $i: status = $STATUS"
+            if [ "$STATUS" = "completed" ]; then
+              echo "Job completed successfully!"
+              exit 0
+            fi
+            sleep 2
+          done
+ 
+          echo "ERROR: Job never completed. Worker logs:"
+          docker compose logs worker
+          exit 1
+ 
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== All container statuses ==="
+          docker ps -a
+          echo "=== Compose logs ==="
+          docker compose logs
+ 
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    needs: integration-test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+ 
+      - name: Download images
+        uses: actions/download-artifact@v5
+        with:
+          name: docker-images
+ 
+      - name: Load images
+        run: |
+          docker load -i api-image.tar
+          docker load -i worker-image.tar
+          docker load -i frontend-image.tar
+          docker tag api:${{ github.sha }} api:latest
+          docker tag worker:${{ github.sha }} worker:latest
+          docker tag frontend:${{ github.sha }} frontend:latest
+ 
+      - name: Ensure stack is running (initial deploy if needed)
+        run: |
+          # If nothing is running yet, do a clean first-time startup and exit.
+          # On subsequent runs this is skipped and the rolling update below takes over.
+          if ! docker ps --format '{{.Names}}' | grep -q "job-queue"; then
+            echo "No existing stack found — performing initial deployment."
+            docker compose -f docker-compose.yml up -d
+            echo "Initial deployment done."
+            exit 0
+          fi
+          echo "Existing stack detected — proceeding with rolling update."
+ 
+      - name: Rolling update
+        # For each service:
+        #   1. Start the NEW container under a temporary name
+        #   2. Wait up to 60s for it to pass its HEALTHCHECK
+        #   3. If healthy  → stop+remove the OLD container, rename NEW → canonical name
+        #   4. If unhealthy → remove the NEW container, leave OLD running, fail the pipeline
+        #
+        # Order matters: update stateless services (api, worker) before frontend
+        # so the frontend's dependency (api) is already on the new version.
+        run: |
+          set -euo pipefail
+ 
+          SERVICES=("api" "worker" "frontend")
+          SHA="${{ github.sha }}"
+ 
+          # Helper: wait for a container to become healthy (max 60s)
+          wait_healthy() {
+            local container="$1"
+            local deadline=$((SECONDS + 60))
+            echo "  Waiting for $container to become healthy (timeout 60s)..."
+            while [ $SECONDS -lt $deadline ]; do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
+              echo "    health = $STATUS"
+              if [ "$STATUS" = "healthy" ]; then
+                return 0
+              fi
+              sleep 3
+            done
+            echo "  ERROR: $container did not become healthy within 60 seconds."
+            return 1
+          }
+ 
+          for SERVICE in "${SERVICES[@]}"; do
+            OLD="job-queue-${SERVICE}"
+            NEW="job-queue-${SERVICE}-new"
+ 
+            echo ""
+            echo "══════════════════════════════════════"
+            echo " Rolling update: $SERVICE"
+            echo "══════════════════════════════════════"
+ 
+            # ── Step 1: get the run flags from docker inspect on the old container ──
+            # We re-use docker compose to spin up the new container so all env/network
+            # config from docker-compose.yml is respected automatically — but we give it
+            # a temporary container name so the old one keeps serving traffic.
+            echo "  Starting new $SERVICE container..."
+            docker compose -f docker-compose.yml run \
+              --name "$NEW" \
+              --detach \
+              --no-deps \
+              "$SERVICE"
+ 
+            # ── Step 2: health check ──
+            if wait_healthy "$NEW"; then
+              echo "  New $SERVICE container is healthy."
+ 
+              # ── Step 3: swap ──
+              echo "  Stopping old container: $OLD"
+              docker stop "$OLD" 2>/dev/null || true
+              docker rm "$OLD" 2>/dev/null || true
+ 
+              echo "  Renaming $NEW → $OLD"
+              docker rename "$NEW" "$OLD"
+ 
+              echo "  $SERVICE updated successfully."
+            else
+              # ── Step 4: abort, leave old container running ──
+              echo "  Rolling back: removing failed new container."
+              docker rm -f "$NEW" 2>/dev/null || true
+              echo "  Old $SERVICE container is still running — deployment aborted."
+              exit 1
+            fi
+          done
+ 
+          echo ""
+          echo "All services updated successfully."
+ 
+      - name: Verify final stack health
+        run: |
+          echo "Final health check on all containers..."
+          ALL_HEALTHY=true
+          for SERVICE in api worker frontend; do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' "job-queue-${SERVICE}" 2>/dev/null || echo "missing")
+            echo "  job-queue-$SERVICE → $STATUS"
+            if [ "$STATUS" != "healthy" ]; then
+              ALL_HEALTHY=false
+            fi
+          done
+ 
+          if [ "$ALL_HEALTHY" = "false" ]; then
+            echo "ERROR: One or more services are not healthy after deployment."
+            exit 1
+          fi
+          echo "Deployment verified — all services healthy."
+ 
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Container statuses ==="
+          docker ps -a
+          echo "=== Compose logs ==="
+          docker compose -f docker-compose.yml logs

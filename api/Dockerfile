@@ -6,11 +6,11 @@ COPY requirements.txt .
 RUN pip install --user --no-cache-dir -r requirements.txt
 
 # Stage 2: Final
-FROM python:3.11-slim
+FROM python:3.11-slim AS final
 
 # Create non-root user
-RUN addgroup --system --gid 1001 appuser && \
-    adduser --system --uid 1001 --ingroup appuser --no-create-home appuser && \
+RUN groupadd --gid 1001 appuser && \
+  useradd --uid 1001 --gid appuser --create-home --shell /usr/sbin/nologin appuser && \
     mkdir -p /app && \
     chown -R appuser:appuser /app
 
