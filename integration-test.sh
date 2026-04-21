@@ -1,54 +1,92 @@
 #!/bin/bash
-
-# Integration test script for job processing system
 set -e
 
-echo "Starting integration tests..."
+echo "=========================================="
+echo "Starting integration tests"
+echo "=========================================="
 
-# Wait for services to be ready
-echo "Waiting for services to be ready..."
-sleep 30
+# Function to check if a service is responding
+check_service() {
+    local url=$1
+    local name=$2
+    local max_attempts=30
+    local attempt=1
+    
+    echo "Waiting for $name to be ready..."
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf "$url" > /dev/null 2>&1; then
+            echo "✓ $name is ready (attempt $attempt)"
+            return 0
+        fi
+        echo "  Attempt $attempt/$max_attempts: $name not ready yet..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    
+    echo "✗ $name failed to become ready within timeout"
+    return 1
+}
 
-# Test health endpoints
-echo "Testing health endpoints..."
-curl -f http://localhost:3000/health || exit 1
-curl -f http://localhost:8000/health || exit 1
+# Wait for containers to start
+echo ""
+echo "Step 1: Waiting for containers to start..."
+sleep 20
+
+# Check API health
+check_service "http://localhost:8000/health" "API" || exit 1
+
+# Check frontend health
+check_service "http://localhost:3000/health" "Frontend" || exit 1
 
 # Submit a job
-echo "Submitting test job..."
+echo ""
+echo "Step 2: Submitting a test job..."
 RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
-JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+echo "Response: $RESPONSE"
 
+JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id')
 if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
-    echo "Failed to create job"
+    echo "✗ Failed to get job ID from response"
+    exit 1
+fi
+echo "✓ Job created with ID: $JOB_ID"
+
+# Poll for job completion
+echo ""
+echo "Step 3: Waiting for job to complete..."
+MAX_ATTEMPTS=60
+ATTEMPT=1
+COMPLETED=false
+
+while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+    STATUS_RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
+    STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status')
+    
+    echo "  Attempt $ATTEMPT/$MAX_ATTEMPTS: Job status = $STATUS"
+    
+    if [ "$STATUS" = "completed" ]; then
+        COMPLETED=true
+        echo "✓ Job completed successfully!"
+        break
+    elif [ "$STATUS" = "failed" ]; then
+        echo "✗ Job failed!"
+        exit 1
+    fi
+    
+    ATTEMPT=$((ATTEMPT + 1))
+    sleep 2
+done
+
+if [ "$COMPLETED" = false ]; then
+    echo "✗ Job did not complete within timeout"
+    echo ""
+    echo "Debug information:"
+    echo "Worker logs:"
+    docker logs job-queue-worker --tail 50 2>&1 || echo "Worker not running"
     exit 1
 fi
 
-echo "Job ID: $JOB_ID"
-
-# Poll for job completion (timeout after 60 seconds)
-TIMEOUT=60
-START_TIME=$(date +%s)
-
-while true; do
-    CURRENT_TIME=$(date +%s)
-    ELAPSED=$((CURRENT_TIME - START_TIME))
-    
-    if [ $ELAPSED -gt $TIMEOUT ]; then
-        echo "Job did not complete within ${TIMEOUT} seconds"
-        exit 1
-    fi
-    
-    STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r '.status')
-    echo "Job status: $STATUS (elapsed: ${ELAPSED}s)"
-    
-    if [ "$STATUS" = "completed" ]; then
-        echo "✅ Job completed successfully!"
-        exit 0
-    elif [ "$STATUS" = "failed" ]; then
-        echo "❌ Job failed!"
-        exit 1
-    fi
-    
-    sleep 2
-done
+echo ""
+echo "=========================================="
+echo "All integration tests passed! ✓"
+echo "=========================================="
