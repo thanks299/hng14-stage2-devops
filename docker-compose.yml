@@ -1,5 +1,6 @@
 version: '3.9'
 
+# Docker Compose configuration for job queue system
 networks:
   internal:
     driver: bridge
