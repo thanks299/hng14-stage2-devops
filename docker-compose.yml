@@ -34,6 +34,8 @@ services:
     build: ./api
     container_name: job-queue-api
     restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
     networks:
       - internal
     environment:
