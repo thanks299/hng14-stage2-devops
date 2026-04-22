@@ -6,7 +6,7 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 # Stage 2: Final
-FROM node:18-alpine
+FROM node:18-alpine AS final
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \

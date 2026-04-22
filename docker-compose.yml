@@ -6,12 +6,12 @@ networks:
 
 services:
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis:7-alpine}
     container_name: job-queue-redis
     restart: unless-stopped
     networks:
       - internal
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly ${REDIS_APPENDONLY:-yes}
     volumes:
       - redis-data:/data
     healthcheck:
@@ -28,10 +28,11 @@ services:
     networks:
       - internal
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - LOG_LEVEL=INFO
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -49,12 +50,13 @@ services:
     networks:
       - internal
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - WORKER_POLL_INTERVAL=5
-      - LOG_LEVEL=INFO
-      - HEALTH_PORT=8080
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-5}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - HEALTH_PORT=${HEALTH_PORT:-8080}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -70,12 +72,12 @@ services:
     container_name: job-queue-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     networks:
       - internal
     environment:
-      - FRONTEND_PORT=3000
-      - API_URL=http://api:8000
+      - FRONTEND_PORT=${FRONTEND_PORT:-3000}
+      - API_URL=${API_URL:-http://api:8000}
     depends_on:
       api:
         condition: service_healthy

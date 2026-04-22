@@ -21,7 +21,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
       
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -75,7 +76,8 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
       
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -113,26 +115,79 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    services:
+      local-registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
       
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Optional local registry login
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          if [ -n "$REGISTRY_USERNAME" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+            echo "$REGISTRY_PASSWORD" | docker login $REGISTRY -u "$REGISTRY_USERNAME" --password-stdin
+          else
+            echo "Registry credentials not set. Skipping login."
+          fi
       
       - name: Build API image
-        run: docker build -t api:${{ github.sha }} ./api
+        run: |
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --load \
+            -t api:${{ github.sha }} \
+            -t api:latest \
+            -t $REGISTRY/api:${{ github.sha }} \
+            -t $REGISTRY/api:latest \
+            ./api
       
       - name: Build Worker image
-        run: docker build -t worker:${{ github.sha }} ./worker
+        run: |
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --load \
+            -t worker:${{ github.sha }} \
+            -t worker:latest \
+            -t $REGISTRY/worker:${{ github.sha }} \
+            -t $REGISTRY/worker:latest \
+            ./worker
       
       - name: Build Frontend image
-        run: docker build -t frontend:${{ github.sha }} ./frontend
+        run: |
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --load \
+            -t frontend:${{ github.sha }} \
+            -t frontend:latest \
+            -t $REGISTRY/frontend:${{ github.sha }} \
+            -t $REGISTRY/frontend:latest \
+            ./frontend
       
       - name: Tag images as latest
         run: |
           docker tag api:${{ github.sha }} api:latest
           docker tag worker:${{ github.sha }} worker:latest
           docker tag frontend:${{ github.sha }} frontend:latest
+
+      - name: Push images to local registry
+        run: |
+          docker push $REGISTRY/api:${{ github.sha }}
+          docker push $REGISTRY/api:latest
+          docker push $REGISTRY/worker:${{ github.sha }}
+          docker push $REGISTRY/worker:latest
+          docker push $REGISTRY/frontend:${{ github.sha }}
+          docker push $REGISTRY/frontend:latest
       
       - name: Scan API with Trivy
         uses: aquasecurity/trivy-action@master
@@ -219,7 +274,8 @@ jobs:
     needs: build-and-scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
  
       - name: Download images
         uses: actions/download-artifact@v5
@@ -246,7 +302,7 @@ jobs:
           EOF
  
       - name: Start services
-        run: docker compose -f docker-compose.yml up -d
+        run: docker-compose -f docker-compose.yml up -d || docker compose -f docker-compose.yml up -d
  
       - name: Wait for API to be healthy
         # FIX: Poll the API container health directly via Docker instead of
@@ -263,7 +319,7 @@ jobs:
             fi
             if [ $i -eq 30 ]; then
               echo "API never became healthy. Container logs:"
-              docker compose logs api
+              docker-compose logs api || docker compose logs api
               exit 1
             fi
             sleep 5
@@ -280,7 +336,7 @@ jobs:
             echo "  Attempt $i: frontend not ready yet"
             if [ $i -eq 24 ]; then
               echo "Frontend never became reachable. Logs:"
-              docker compose logs frontend
+              docker-compose logs frontend || docker compose logs frontend
               exit 1
             fi
             sleep 5
@@ -313,7 +369,7 @@ jobs:
           done
  
           echo "ERROR: Job never completed. Worker logs:"
-          docker compose logs worker
+          docker-compose logs worker || docker compose logs worker
           exit 1
  
       - name: Debug on failure
@@ -322,18 +378,19 @@ jobs:
           echo "=== All container statuses ==="
           docker ps -a
           echo "=== Compose logs ==="
-          docker compose logs
+          docker-compose logs || docker compose logs
  
       - name: Cleanup
         if: always()
-        run: docker compose down -v
+        run: docker-compose down -v || docker compose down -v
 
   deploy:
     needs: integration-test
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
  
       - name: Download images
         uses: actions/download-artifact@v5

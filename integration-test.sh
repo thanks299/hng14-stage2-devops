@@ -14,7 +14,7 @@ check_service() {
     
     echo "Waiting for $name to be ready..."
     while [ $attempt -le $max_attempts ]; do
-        if curl -sf "$url" > /dev/null 2>&1; then
+        if timeout 5s curl -sf "$url" > /dev/null 2>&1; then
             echo "✓ $name is ready (attempt $attempt)"
             return 0
         fi
@@ -59,7 +59,7 @@ ATTEMPT=1
 COMPLETED=false
 
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-    STATUS_RESPONSE=$(curl -s http://localhost:3000/status/$JOB_ID)
+    STATUS_RESPONSE=$(timeout 5s curl -s http://localhost:3000/status/$JOB_ID)
     STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status')
     
     echo "  Attempt $ATTEMPT/$MAX_ATTEMPTS: Job status = $STATUS"
