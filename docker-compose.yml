@@ -1,4 +1,4 @@
-# version: '3.8' - Remove this line to avoid warning
+version: '3.9'
 
 networks:
   internal:
