@@ -1,8 +1,12 @@
 #!/bin/bash
 set -e
 
+# Timeout configuration
+TIMEOUT=${1:-300}
+SCRIPT_TIMEOUT=$((TIMEOUT - 30))
+
 echo "=========================================="
-echo "Starting integration tests"
+echo "Starting integration tests (timeout: ${TIMEOUT}s)"
 echo "=========================================="
 
 # Function to check if a service is responding
@@ -57,12 +61,21 @@ echo "Step 3: Waiting for job to complete..."
 MAX_ATTEMPTS=60
 ATTEMPT=1
 COMPLETED=false
+START_TIME=$(date +%s)
 
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+    CURRENT_TIME=$(date +%s)
+    ELAPSED=$((CURRENT_TIME - START_TIME))
+    
+    if [ $ELAPSED -gt $SCRIPT_TIMEOUT ]; then
+        echo "✗ Script execution time exceeded timeout"
+        exit 1
+    fi
+    
     STATUS_RESPONSE=$(timeout 5s curl -s http://localhost:3000/status/$JOB_ID)
     STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status')
     
-    echo "  Attempt $ATTEMPT/$MAX_ATTEMPTS: Job status = $STATUS"
+    echo "  Attempt $ATTEMPT/$MAX_ATTEMPTS: Job status = $STATUS (elapsed: ${ELAPSED}s)"
     
     if [ "$STATUS" = "completed" ]; then
         COMPLETED=true
